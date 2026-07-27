@@ -1,0 +1,90 @@
+{
+  "profiles": [
+    {
+      "id": "usb_19bc376c83",
+      "source_type": "usb",
+      "name": "USB Camera",
+      "resolution": [
+        1280,
+        800
+      ],
+      "orientation": "normal",
+      "crop_percentages": {
+        "top": 8,
+        "bottom": 2,
+        "left": 14,
+        "right": 22
+      },
+      "created_at": "2026-07-24T12:22:43",
+      "device_path": "\\\\?\\usb#vid_0c45&pid_636d&mi_00#7&3171a958&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+      "device_name": "USB Camera",
+      "fourcc": "MJPG",
+      "calibration_model": "pinhole",
+      "detector_type": "grayscale",
+      "profile_version": 1,
+      "camera_role": "monochrome_ftir",
+      "alias": "Monochrome FTIR Camera",
+      "connect_width": null,
+      "connect_height": null,
+      "connect_fps": null
+    },
+    {
+      "id": "vdo_ninja_cc5b68fca6",
+      "source_type": "vdo_ninja",
+      "name": "initial test",
+      "resolution": [
+        1080,
+        1086
+      ],
+      "orientation": "normal",
+      "crop_percentages": {
+        "top": 9,
+        "bottom": 11,
+        "left": 8,
+        "right": 8
+      },
+      "created_at": "2026-07-24T13:44:39",
+      "device_path": null,
+      "device_name": "initial test",
+      "fourcc": null,
+      "calibration_model": "pinhole",
+      "detector_type": "color",
+      "profile_version": 1,
+      "camera_role": null,
+      "alias": "initial test",
+      "connect_width": null,
+      "connect_height": null,
+      "connect_fps": null
+    },
+    {
+      "id": "usb_a3bfe6d507",
+      "source_type": "usb",
+      "name": "HD USB Camera",
+      "alias": "Fisheye 170",
+      "camera_role": "color_ftir",
+      "device_path": "\\\\?\\usb#vid_05a3&pid_9230&mi_00#8&1c85960f&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+      "device_name": "HD USB Camera",
+      "fourcc": "MJPG",
+      "connect_width": 1920,
+      "connect_height": 1080,
+      "connect_fps": 30.0,
+      "calibration_model": "pinhole",
+      "detector_type": "color",
+      "profile_version": 1,
+      "resolution": null,
+      "orientation": "normal",
+      "crop_percentages": {
+        "top": 0,
+        "bottom": 9,
+        "left": 20,
+        "right": 24
+      },
+      "created_at": "2026-07-27T02:18:47"
+    }
+  ],
+  "active_by_source": {
+    "vdo_ninja": "vdo_ninja_cc5b68fca6",
+    "usb:\\\\?\\usb#vid_0c45&pid_636d&mi_00#7&3171a958&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global": "usb_19bc376c83",
+    "usb:\\\\?\\usb#vid_05a3&pid_9230&mi_00#8&1c85960f&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global": "usb_a3bfe6d507"
+  }
+}
