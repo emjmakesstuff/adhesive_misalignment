@@ -19,13 +19,13 @@ Both paths produce detection.Fragment lists, wrapped into the same
 regions.DetectedRegion structure for reporting (see regions.py) --
 downstream rendering code is written once, not duplicated per detector.
 
-Circle configuration (Stage 5) inputs are kept and saved per-profile,
-but NOT used to draw or assign circles here -- expected count/area/
-tolerance are metadata for a future grouping/coverage pass
-(assignment.py/measurement.py, both still present and correct, just not
-called from this live loop) once shape-aware detection is solid on both
-sources. Nothing here assumes a detected region is circular; fragments
-are shown exactly as cv2.findContours traces them.
+Nothing here assumes a detected region is circular; fragments are shown
+exactly as cv2.findContours traces them. (An earlier version grouped
+fragments into expected circles via assignment.py/measurement.py --
+removed, since the Processing tab's per-pad ROI analysis
+(processing_project.py/detection_pipeline.py) replaced that idea
+entirely with user-drawn rectangular search regions instead of expected
+circle counts/positions.)
 
 Reads main_window.latest_frame on a timer -- the same shared reference
 LiveCameraTab already writes to (from either a CameraStream or a
@@ -67,6 +67,7 @@ import calibration_profiles
 import circle_config as circle_config_module
 import color_detection
 import detection
+import detection_pipeline
 import distortion
 import regions
 import scale as scale_module
@@ -127,30 +128,10 @@ class DetectionTab(QWidget):
         scroll_area.setWidget(content)
         layout = QVBoxLayout(content)
 
-        # ---- circle configuration (kept for future grouping; not applied here) ----
+        # ---- detector configuration (thresholds -- see threshold_stack below) ----
 
-        config_box = QGroupBox("Circle configuration (Stage 5 -- saved for later grouping, not used below yet)")
+        config_box = QGroupBox("Detector configuration")
         config_form = QFormLayout(config_box)
-
-        self.count_mode_combo = QComboBox()
-        self.count_mode_combo.addItems(["exact", "max"])
-        config_form.addRow("Count mode:", self.count_mode_combo)
-
-        self.expected_count_spin = QSpinBox()
-        self.expected_count_spin.setRange(1, 200)
-        config_form.addRow("Expected circle count:", self.expected_count_spin)
-
-        self.expected_area_spin = QDoubleSpinBox()
-        self.expected_area_spin.setRange(0.01, 100000.0)
-        self.expected_area_spin.setDecimals(3)
-        self.expected_area_spin.setSuffix(" mm²")
-        config_form.addRow("Expected area per circle:", self.expected_area_spin)
-
-        self.area_tolerance_spin = QDoubleSpinBox()
-        self.area_tolerance_spin.setRange(0.0, 500.0)
-        self.area_tolerance_spin.setDecimals(1)
-        self.area_tolerance_spin.setSuffix(" %")
-        config_form.addRow("Area tolerance:", self.area_tolerance_spin)
 
         self.save_config_button = QPushButton("Save Config")
 
@@ -442,10 +423,6 @@ class DetectionTab(QWidget):
         )
         config = circle_config_module.load_circle_config(path=path)
 
-        self.count_mode_combo.setCurrentText(config["count_mode"])
-        self.expected_count_spin.setValue(config["expected_count"])
-        self.expected_area_spin.setValue(config["expected_area_mm2"])
-        self.area_tolerance_spin.setValue(config["area_tolerance_pct"])
         self.possible_spin.setValue(config["possible_threshold"])
         self.probable_spin.setValue(config["probable_threshold"])
         self.strong_spin.setValue(config["strong_threshold"])
@@ -467,10 +444,6 @@ class DetectionTab(QWidget):
 
     def _current_config(self) -> dict:
         return {
-            "count_mode": self.count_mode_combo.currentText(),
-            "expected_count": self.expected_count_spin.value(),
-            "expected_area_mm2": self.expected_area_spin.value(),
-            "area_tolerance_pct": self.area_tolerance_spin.value(),
             "possible_threshold": self.possible_spin.value(),
             "probable_threshold": self.probable_spin.value(),
             "strong_threshold": self.strong_spin.value(),
@@ -487,11 +460,6 @@ class DetectionTab(QWidget):
             "show_masks": self.show_masks_check.isChecked(),
             "vdo_processing_fps": self.vdo_fps_spin.value(),
         }
-
-    def _active_hue_ranges(self, config: dict) -> list[tuple[int, int]]:
-        if config["hue_min"] is not None and config["hue_max"] is not None:
-            return [(int(config["hue_min"]), int(config["hue_max"]))]
-        return color_detection.HUE_PRESETS[config["color_preset"]]
 
     def _save_config(self) -> None:
         profile_id = self._active_profile_id()
@@ -675,9 +643,8 @@ class DetectionTab(QWidget):
                 return
 
             try:
-                display_map = background_reference.compute_difference(gray, background)
-                fragments = detection.detect_fragments(
-                    display_map, config["possible_threshold"], config["probable_threshold"], config["strong_threshold"]
+                fragments, display_map = detection_pipeline.run_detection(
+                    bgr, detector_type, config, background=background
                 )
             except ValueError as error:
                 self.status_label.setText(f"ERROR: {error}")
@@ -695,17 +662,7 @@ class DetectionTab(QWidget):
             self._last_vdo_process_time = now
 
             try:
-                fragments, display_map = color_detection.detect_color_fragments(
-                    bgr,
-                    self._active_hue_ranges(config),
-                    config["weak_sat_min"],
-                    config["weak_val_min"],
-                    config["core_sat_min"],
-                    config["core_val_min"],
-                    config["vdo_possible_threshold"],
-                    config["vdo_probable_threshold"],
-                    config["vdo_strong_threshold"],
-                )
+                fragments, display_map = detection_pipeline.run_detection(bgr, detector_type, config)
             except ValueError as error:
                 self.status_label.setText(f"ERROR: {error}")
                 return

@@ -169,12 +169,39 @@ class VdoNinjaSource:
         self._view_url = ""
         self._requested_fps = 15.0
 
-    def open(self, view_url: str, requested_fps: float = 15.0) -> None:
+        # Dispatcher wiring -- all optional (default None) so this class
+        # stays usable standalone (e.g. ../test_code.py-style direct use)
+        # without a main_window/FrameDispatcher in the picture. When
+        # provided, _capture_loop publishes every captured frame through
+        # the same dispatcher USB's ThreadedCameraSource uses -- see
+        # frame_dispatcher.py and its "Camera-switch safety" notes.
+        self._dispatcher = None
+        self._source_key = None
+        self._session_id = None
+
+    @property
+    def session_id(self) -> str | None:
+        """The source_session_id this instance publishes under, or None
+        if opened without dispatcher wiring -- same purpose as
+        ThreadedCameraSource.session_id (see frame_dispatcher.py)."""
+        return self._session_id
+
+    def open(
+        self,
+        view_url: str,
+        requested_fps: float = 15.0,
+        dispatcher=None,
+        source_key: str | None = None,
+        source_session_id: str | None = None,
+    ) -> None:
         if self._thread is not None:
             raise RuntimeError("VdoNinjaSource.open() called while already open -- call release() first.")
 
         self._view_url = view_url
         self._requested_fps = requested_fps
+        self._dispatcher = dispatcher
+        self._source_key = source_key
+        self._session_id = source_session_id
         self._stop_event.clear()
 
         with self._lock:
@@ -182,6 +209,13 @@ class VdoNinjaSource:
             self._status = "connecting"
             self._native_width = 0
             self._native_height = 0
+
+        if self._dispatcher is not None and self._session_id is not None:
+            # Activated before the thread starts, same ordering
+            # ThreadedCameraSource.start() uses -- no frame this source
+            # captures can be published before its session is the active
+            # one.
+            self._dispatcher.activate_session(self._session_id)
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -218,6 +252,9 @@ class VdoNinjaSource:
         if self._thread is not None:
             self._thread.join(timeout=10.0)
             self._thread = None
+
+        if self._dispatcher is not None and self._session_id is not None:
+            self._dispatcher.invalidate_session(self._session_id)
 
     # ---- worker thread body ----
 
@@ -367,3 +404,6 @@ class VdoNinjaSource:
                     self._native_width = captured["width"]
                     self._native_height = captured["height"]
                     self._status = "live"
+
+                if self._dispatcher is not None and self._session_id is not None:
+                    self._dispatcher.publish(frame, self._source_key, self._session_id)

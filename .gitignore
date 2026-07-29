@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Generated FTIR data
+FTIR-program/recordings/
+FTIR-program/processing_projects/
+FTIR-program/generated_test_videos/
+
+# Video files
+FTIR-program/*.avi
+FTIR-program/*.mkv
+FTIR-program/*.mp4
+
+# Temporary files
+*.tmp
+*.log
+
+# Pre-edit snapshot backups (plain folder copies, not source)
+stage2_working_backup/
+stage3_recording_redesign_backup/

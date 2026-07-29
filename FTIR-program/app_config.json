@@ -3,5 +3,5 @@
   "undistort_crop_bottom_pct": 2,
   "undistort_crop_left_pct": 14,
   "undistort_crop_right_pct": 22,
-  "show_undistorted": true
+  "show_undistorted": false
 }

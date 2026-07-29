@@ -23,6 +23,7 @@ do the right thing for either source without a formal interface.
 from __future__ import annotations
 
 import threading
+import uuid
 
 import cv2
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSlider,
@@ -49,12 +51,14 @@ import calibration_profiles
 import camera_controls
 import camera_identity
 import distortion
+import recorder as recorder_module
 import vdo_ninja_source
 from camera import BACKENDS, CameraStream, FpsMeter, list_device_formats, list_device_names, probe_cameras
 from config_store import load_config, save_config
 from preview import describe_frame_format, to_display_bgr
 from processing import process_frame
 from settings import get_exposure_gain_info
+from threaded_camera_source import ThreadedCameraSource
 
 USB_POLL_INTERVAL_MS = 15  # real display rate is limited by actual frame arrival, not this
 # VDO.Ninja's poll interval is computed in connect_vdo_ninja() from the
@@ -139,7 +143,7 @@ class LiveCameraTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
-        self.stream: CameraStream | vdo_ninja_source.VdoNinjaSource | None = None
+        self.stream: ThreadedCameraSource | vdo_ninja_source.VdoNinjaSource | None = None
         self.fps_meter = FpsMeter()
         self.consecutive_failures = 0
         self.max_consecutive_failures = 60
@@ -291,6 +295,48 @@ class LiveCameraTab(QWidget):
 
         layout.addWidget(crop_box)
 
+        # ---- recording (source-agnostic -- works for whichever of USB/VDO.Ninja is active) ----
+
+        recording_box = QGroupBox("Recording")
+        recording_layout = QVBoxLayout(recording_box)
+
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(QLabel("Quality:"))
+        self.quality_mode_combo = QComboBox()
+        self.quality_mode_combo.addItem("Lossless (measurement)", "lossless")
+        self.quality_mode_combo.addItem("Lossy prototype (framing/setup only)", "lossy_prototype")
+        self.quality_mode_combo.setToolTip(
+            "Lossless: codec is chosen automatically from this camera's role "
+            "(FFV1 for monochrome, HFYU for color) -- see recorder.py. Lossy "
+            "prototype (MJPG) is smaller/faster but NOT valid for calibrated "
+            "intensity measurement -- every recording made in this mode is "
+            "tagged accordingly and should only be used for quick framing/setup runs."
+        )
+        quality_row.addWidget(self.quality_mode_combo)
+        quality_row.addStretch(1)
+        recording_layout.addLayout(quality_row)
+
+        self.recording_size_warning_label = QLabel("")
+        self.recording_size_warning_label.setWordWrap(True)
+        self.recording_size_warning_label.setStyleSheet("color: #b06000;")
+        recording_layout.addWidget(self.recording_size_warning_label)
+
+        record_button_row = QHBoxLayout()
+        self.start_recording_button = QPushButton("Start Recording")
+        self.start_recording_button.setEnabled(False)
+        record_button_row.addWidget(self.start_recording_button)
+        self.stop_recording_button = QPushButton("Stop Recording")
+        self.stop_recording_button.setEnabled(False)
+        record_button_row.addWidget(self.stop_recording_button)
+        record_button_row.addStretch(1)
+        recording_layout.addLayout(record_button_row)
+
+        self.recording_status_label = QLabel("Not recording.")
+        self.recording_status_label.setWordWrap(True)
+        recording_layout.addWidget(self.recording_status_label)
+
+        layout.addWidget(recording_box)
+
         # ---- shared preview (both sources render into these) ----
 
         self.info_label = QLabel("Not connected.")
@@ -307,12 +353,26 @@ class LiveCameraTab(QWidget):
         self.refresh_button.clicked.connect(self.refresh_devices)
         self.index_combo.currentIndexChanged.connect(self._on_index_combo_changed)
         self.connect_button.clicked.connect(self.connect_camera)
-        self.disconnect_button.clicked.connect(self.disconnect_camera)
+        # NOT `.connect(self.disconnect_camera)` directly: QPushButton.clicked
+        # emits clicked(checked: bool), and PySide adapts the call to however
+        # many arguments the connected callable accepts -- since
+        # disconnect_camera()'s first (and only) parameter is
+        # recorder_stop_reason, a direct connection silently passes the
+        # button's checked state (False) into it instead of using the real
+        # default "camera_disconnected". Confirmed directly: this exact bug
+        # was live and had already corrupted a real recording's stop_reason
+        # (and, worse, its completed_normally, since `False not in (...)` is
+        # True) before being caught here. Same reasoning for the two
+        # connections below.
+        self.disconnect_button.clicked.connect(lambda: self.disconnect_camera())
         self.vdo_connect_button.clicked.connect(self.connect_vdo_ninja)
-        self.vdo_disconnect_button.clicked.connect(self.disconnect_vdo_ninja)
+        self.vdo_disconnect_button.clicked.connect(lambda: self.disconnect_vdo_ninja())
         self.controls_panel_button.clicked.connect(self._toggle_controls_panel)
         self.undistort_check.toggled.connect(self._on_undistort_toggled)
         self.probe_finished.connect(self._on_probe_finished)
+        self.quality_mode_combo.currentIndexChanged.connect(self._update_recording_size_warning)
+        self.start_recording_button.clicked.connect(self.start_recording)
+        self.stop_recording_button.clicked.connect(lambda: self.stop_recording())
 
         for side, slider in self.crop_sliders.items():
             slider.valueChanged.connect(lambda value, s=side: self._on_crop_value_changed(s, value))
@@ -320,9 +380,16 @@ class LiveCameraTab(QWidget):
 
         self.reload_crop_from_profile()
         self._load_undistort_preference()
+        self._update_recording_size_warning()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_frame)
+
+        # Separate from the frame-display timer above -- only runs while
+        # actively recording, at a much coarser interval (this just
+        # refreshes a status label, not the preview).
+        self.recording_status_timer = QTimer(self)
+        self.recording_status_timer.timeout.connect(self._refresh_recording_status)
 
         self.refresh_devices()
 
@@ -657,13 +724,30 @@ class LiveCameraTab(QWidget):
         self.main_window.default_controls = camera_controls.get_all(stream.cap)
         self.main_window.default_exposure_info = get_exposure_gain_info(stream.cap)
 
-        self.stream = stream
-        self.main_window.stream = stream
+        # Real acquisition moves off the GUI thread here: ThreadedCameraSource
+        # spins a dedicated background thread that calls stream.read() in a
+        # tight loop (paced only by cv2.VideoCapture's own blocking behavior,
+        # not this tab's 15ms timer), publishing every frame through
+        # main_window.frame_dispatcher. _update_frame() below is unchanged --
+        # it still just calls self.stream.read(), which now returns whatever
+        # the background thread last captured instead of driving capture
+        # itself.
+        source_key = calibration_profiles.profile_key(profile)
+        threaded_stream = ThreadedCameraSource(
+            stream,
+            self.main_window.frame_dispatcher,
+            source_key=source_key,
+            source_session_id=uuid.uuid4().hex,
+        )
+        threaded_stream.start()
+
+        self.stream = threaded_stream
+        self.main_window.stream = threaded_stream
         self.format_described = False
         self.consecutive_failures = 0
         self.fps_meter = FpsMeter()
 
-        self.main_window.active_profile_key = calibration_profiles.profile_key(profile)
+        self.main_window.active_profile_key = source_key
         calibration_profiles.set_active_profile(self.main_window.active_profile_key, profile["id"])
         # Remembers the format actually requested (matching what's shown
         # selected in the dropdown) so reconnecting later reselects the
@@ -679,16 +763,29 @@ class LiveCameraTab(QWidget):
         self.index_combo.setEnabled(False)
         self.refresh_button.setEnabled(False)
         self.format_combo.setEnabled(False)
+        self.start_recording_button.setEnabled(True)
+        self._update_recording_size_warning()
 
         self.timer.start(USB_POLL_INTERVAL_MS)
 
-    def disconnect_camera(self) -> None:
+    def disconnect_camera(self, recorder_stop_reason: str = "camera_disconnected") -> None:
         self.timer.stop()
 
+        if self.main_window.recorder.is_recording:
+            self.stop_recording(stop_reason=recorder_stop_reason)
+
         if self.stream is not None:
+            # ThreadedCameraSource.release() blocks until its capture
+            # thread has actually exited (not merely signaled) before
+            # returning -- see threaded_camera_source.py -- so by the time
+            # this call returns, a subsequent connect_camera() cannot race
+            # with any frame this source's worker might still be publishing.
             self.stream.release()
             self.stream = None
             self.main_window.stream = None
+            # A stale frame from the just-released source must never be
+            # mistaken for a newly-connected one's.
+            self.main_window.latest_frame = None
 
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
@@ -699,6 +796,7 @@ class LiveCameraTab(QWidget):
         # disables it again when falling back to the single "unavailable"
         # entry, so this doesn't need to duplicate that condition.
         self.format_combo.setEnabled(bool(self._formats_by_index.get(self.index_combo.currentData())))
+        self.start_recording_button.setEnabled(False)
         self.video_label.setPixmap(QPixmap())
         self.video_label.setText("No preview yet.")
         self.info_label.setText("Not connected.")
@@ -713,7 +811,13 @@ class LiveCameraTab(QWidget):
             return
 
         source = vdo_ninja_source.VdoNinjaSource()
-        source.open(url, requested_fps=self.vdo_fps_spin.value())
+        source.open(
+            url,
+            requested_fps=self.vdo_fps_spin.value(),
+            dispatcher=self.main_window.frame_dispatcher,
+            source_key="vdo_ninja",
+            source_session_id=uuid.uuid4().hex,
+        )
 
         self.stream = source
         self.main_window.stream = source
@@ -748,22 +852,188 @@ class LiveCameraTab(QWidget):
         poll_interval_ms = max(10, int(1000 / self.vdo_fps_spin.value()))
         self.timer.start(poll_interval_ms)
 
-    def disconnect_vdo_ninja(self) -> None:
+        self.start_recording_button.setEnabled(True)
+        self._update_recording_size_warning()
+
+    def disconnect_vdo_ninja(self, recorder_stop_reason: str = "camera_disconnected") -> None:
         self.timer.stop()
+
+        if self.main_window.recorder.is_recording:
+            self.stop_recording(stop_reason=recorder_stop_reason)
 
         if self.stream is not None:
             self.stream.release()
             self.stream = None
             self.main_window.stream = None
+            self.main_window.latest_frame = None
 
         self.vdo_connect_button.setEnabled(True)
         self.vdo_disconnect_button.setEnabled(False)
         self.vdo_url_edit.setEnabled(True)
         self.vdo_fps_spin.setEnabled(True)
+        self.start_recording_button.setEnabled(False)
         self.video_label.setPixmap(QPixmap())
         self.video_label.setText("No preview yet.")
         self.info_label.setText("Not connected.")
         self.vdo_status_label.setText("Not connected.")
+
+    # ---- recording ----
+
+    def _update_recording_size_warning(self) -> None:
+        """Refreshed on connect and whenever the quality-mode combo
+        changes -- shows the real-hardware-measured GB/minute for
+        whichever camera role is currently active (see recorder.py's
+        FALLBACK_BYTES_PER_SECOND_BY_ROLE), so the ELP's much larger
+        footprint is never a silent surprise."""
+        profile = calibration_profiles.get_active_profile(self.main_window.active_profile_key)
+        camera_role = profile.get("camera_role") if profile is not None else None
+        quality_mode = self.quality_mode_combo.currentData()
+        gb_per_min = recorder_module.estimated_gb_per_minute(camera_role, quality_mode)
+
+        if quality_mode == "lossy_prototype":
+            self.recording_size_warning_label.setText(
+                f"Lossy prototype mode (MJPG, ~{gb_per_min:.2f} GB/min) -- NOT valid for calibrated "
+                f"intensity measurement. Use only for quick framing/setup."
+            )
+        elif camera_role in recorder_module.CODEC_BY_ROLE:
+            codec = recorder_module.CODEC_BY_ROLE[camera_role]
+            self.recording_size_warning_label.setText(
+                f"Lossless recording for this camera uses {codec['fourcc']}, ~{gb_per_min:.2f} GB/minute."
+            )
+        else:
+            self.recording_size_warning_label.setText(
+                "No validated lossless codec for this camera/role -- switch to Lossy prototype mode to record."
+            )
+
+    def _build_camera_info(self) -> dict:
+        """The metadata schema's "camera" block -- see recording_store.py.
+        opencv_index_at_session is only meaningful for USB (VdoNinjaSource
+        has no .index at all, unlike ThreadedCameraSource); exposure/gain/
+        other_controls only exist for a real cv2.VideoCapture."""
+        info = self.stream.get_info()
+        profile = calibration_profiles.get_active_profile(self.main_window.active_profile_key)
+        source_type = self.main_window.active_source_type
+
+        camera_info = {
+            "device_path": profile.get("device_path") if profile is not None else None,
+            "alias": profile.get("alias") if profile is not None else None,
+            "camera_role": profile.get("camera_role") if profile is not None else None,
+            "source_type": source_type,
+            "opencv_index_at_session": self.stream.index if source_type == "usb" else None,
+            "requested_width": info.get("requested_width"),
+            "requested_height": info.get("requested_height"),
+            "requested_fourcc": info.get("requested_fourcc"),
+            "actual_width": info.get("actual_width"),
+            "actual_height": info.get("actual_height"),
+            "requested_fps": info.get("requested_fps"),
+            "measured_fps": self.fps_meter.fps,
+            "exposure_ms": None,
+            "gain": None,
+            "other_controls": {},
+        }
+
+        if source_type == "usb" and self.stream.cap is not None:
+            with self.stream.lock:
+                controls = camera_controls.get_all(self.stream.cap)
+                exposure_info = get_exposure_gain_info(self.stream.cap)
+            camera_info["exposure_ms"] = exposure_info["exposure_ms"]
+            camera_info["gain"] = controls["gain"]
+            camera_info["other_controls"] = controls
+
+        return camera_info
+
+    def start_recording(self) -> None:
+        if self.stream is None:
+            self.recording_status_label.setText("Not connected -- connect a camera first.")
+            return
+
+        profile = calibration_profiles.get_active_profile(self.main_window.active_profile_key)
+        if profile is None:
+            self.recording_status_label.setText("No active calibration profile -- set one up on the Calibration tab first.")
+            return
+
+        quality_mode = self.quality_mode_combo.currentData()
+
+        try:
+            recorder_module.codec_for(profile.get("camera_role"), quality_mode)
+        except ValueError as error:
+            QMessageBox.warning(self, "Cannot start recording", str(error))
+            return
+
+        headroom = self.main_window.recorder.check_headroom(profile.get("camera_role"), quality_mode)
+        if not headroom["ok"]:
+            proceed = QMessageBox.warning(
+                self,
+                "Low disk space",
+                f"Only about {headroom['estimated_minutes']:.1f} minute(s) of recording headroom remain "
+                f"at the expected ~{headroom['gb_per_minute']:.2f} GB/min for this camera/quality mode.\n\n"
+                f"Start recording anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if proceed != QMessageBox.Yes:
+                return
+
+        camera_info = self._build_camera_info()
+
+        try:
+            recording_id = self.main_window.recorder.start(
+                profile, camera_info, quality_mode=quality_mode, source_session_id=self.stream.session_id
+            )
+        except RuntimeError as error:
+            QMessageBox.critical(self, "Recording failed to start", str(error))
+            return
+
+        self.start_recording_button.setEnabled(False)
+        self.stop_recording_button.setEnabled(True)
+        self.quality_mode_combo.setEnabled(False)
+        self.recording_status_label.setText(f"Recording {recording_id}...")
+        self.recording_status_timer.start(500)
+
+    def stop_recording(self, stop_reason: str = "user_stop_button") -> None:
+        if not self.main_window.recorder.is_recording:
+            return
+
+        self.recording_status_timer.stop()
+        result = self.main_window.recorder.stop(stop_reason=stop_reason)
+
+        self.start_recording_button.setEnabled(self.stream is not None)
+        self.stop_recording_button.setEnabled(False)
+        self.quality_mode_combo.setEnabled(True)
+
+        self.recording_status_label.setText(
+            f"Recording {result['recording_id']} finished ({stop_reason}): "
+            f"{result['output_frames_verified']} frames verified, "
+            f"{result['recorder_queue_drops']} queue drop(s), "
+            f"{len(result['suspected_driver_gaps'])} suspected timing gap(s)."
+        )
+
+    def toggle_recording_hotkey(self) -> None:
+        """Ctrl+R, registered app-wide in gui_app.py -- works regardless
+        of which tab currently has focus."""
+        if self.main_window.recorder.is_recording:
+            self.stop_recording(stop_reason="hotkey")
+        else:
+            self.start_recording()
+
+    def _refresh_recording_status(self) -> None:
+        status = self.main_window.recorder.status()
+        if status is None:
+            return
+
+        disk = self.main_window.recorder.check_disk_space()
+        size_mb = status["bytes_written"] / 1e6
+
+        text = (
+            f"Recording {status['recording_id']}  elapsed={status['elapsed_s']:.0f}s  "
+            f"acquired={status['frames_acquired_during_recording']}  "
+            f"written={status['frames_write_attempted']}  "
+            f"drops={status['recorder_queue_drops']}  queue={status['queue_depth']}  "
+            f"size={size_mb:.1f}MB"
+        )
+        if disk is not None:
+            text += f"  ~{disk['estimated_seconds_remaining'] / 60:.1f} min disk remaining"
+        self.recording_status_label.setText(text)
 
     def _toggle_controls_panel(self) -> None:
         visible = self.main_window.toggle_controls_dock()
@@ -859,7 +1129,7 @@ class LiveCameraTab(QWidget):
                 info = self.stream.get_info()
                 if info["status"].startswith("error"):
                     self.info_label.setText(f"ERROR: {info['status']}. Disconnecting.")
-                    self.disconnect_vdo_ninja()
+                    self.disconnect_vdo_ninja(recorder_stop_reason="error")
                 return
 
             self.consecutive_failures += 1
@@ -868,7 +1138,7 @@ class LiveCameraTab(QWidget):
                 self.info_label.setText(
                     "ERROR: camera stopped delivering frames. Disconnecting."
                 )
-                self.disconnect_camera()
+                self.disconnect_camera(recorder_stop_reason="error")
 
             return
 
@@ -936,8 +1206,11 @@ class LiveCameraTab(QWidget):
         self._refresh_info_label()
 
     def stop(self) -> None:
-        """Called once by MainWindow.closeEvent on app shutdown."""
+        """Called once by MainWindow.closeEvent on app shutdown, AFTER it
+        has already stopped any active recording (stop_reason="app_close")
+        -- this just tears down the frame timer/status timer/stream."""
         self.timer.stop()
+        self.recording_status_timer.stop()
 
         if self.stream is not None:
             self.stream.release()

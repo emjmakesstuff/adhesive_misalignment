@@ -2,22 +2,24 @@
 
 Started as a program for a USB-connected camera plugged directly into
 this PC, frames coming straight from `cv2.VideoCapture` -- deliberately
-kept separate from the standalone VDO.Ninja Playwright prototype one
-level up (`../test_code.py`) for a long time. That's no longer true:
-this app now supports VDO.Ninja as a second, alternate camera source
-(see "Camera sources and calibration profiles" below), adapting that
-prototype's direct-video-element capture technique into its own module
-(`vdo_ninja_source.py`) rather than importing or wrapping the standalone
-script -- `../test_code.py` still exists and still works unchanged as
-its own separate CLI tool.
+kept separate from a standalone VDO.Ninja Playwright prototype one level
+up (`../test_code.py`, since removed from that location) for a long
+time. That's no longer true: this app now supports VDO.Ninja as a
+second, alternate camera source (see "Camera sources and calibration
+profiles" below), adapting that prototype's direct-video-element capture
+technique into its own module (`vdo_ninja_source.py`) rather than
+importing or wrapping the standalone script.
 
 This is being built as a staged pipeline toward quantitative bright-spot
-measurement (contact area, brightness, per expected circle) for FTIR data
-collection. Full plan: 10 stages from camera connection through lens
-distortion correction, physical/brightness calibration, multi-level
-blob detection, per-circle assignment, and measurement/logging. Only the
-stages below are actually built so far -- each stage is meant to be
-independently testable before the next begins.
+measurement (contact area, brightness) for FTIR data collection. Full
+original plan: 10 stages from camera connection through lens distortion
+correction, physical/brightness calibration, multi-level blob detection,
+per-circle assignment, and measurement/logging. Each stage below is
+meant to be independently testable before the next begins -- though the
+actual end state diverged from "per-circle assignment": per-pad
+measurement ended up built around user-drawn ROI rectangles on recorded
+video instead (see "Recording workflow" further down), not circle
+grouping on the live feed.
 
 **Stage 1 (done): reliable camera connection and live preview.**
 No blob/bright-spot detection, no calibration, no measurement UI --
@@ -28,8 +30,13 @@ Exposure/gain must be fixed (not auto) before any brightness measurement
 means anything. See "Camera settings (Stage 2)" below.
 
 **App shell (done): tabbed desktop application (`gui_app.py`).**
-Live Camera, Settings, Calibration, Detection, Results tabs. Wraps the
-Stage 1/2 code as-is (see "Desktop app" below).
+Live Camera, Settings, Calibration, Detection, Recordings, Processing,
+Results. Wraps the Stage 1/2 code as-is (see "Desktop app" below). The
+last three tabs (added well after the original 10-stage plan below --
+see "Recording workflow" further down) are where this project actually
+ended up: record lossless footage once, then iterate on detection tuning
+and per-pad measurement against the same saved frames as many times as
+needed, instead of only ever detecting live.
 
 **Stage 3 (done): lens distortion correction (ChArUco calibration).**
 Board parameters are input fields, not hardcoded -- see "Calibration tab
@@ -45,21 +52,23 @@ shaped fragment detection.** Detects live off the shared camera stream
 raw brightness, with no blur/morphological closing and no assumption
 that a detected region is circular. See "Detection tab (Stages 5-6 live
 rebuild, plus part of 8)" below. Fragment-to-circle grouping/area
-coverage (`assignment.py`/`measurement.py`, Stage 7 + part of 8) exist
-and are tested but not currently wired into the live view. Normalized
+coverage (Stage 7 + part of 8) was built (`assignment.py`/
+`measurement.py`) but never wired into the live view, and was later
+removed once the Processing tab's per-pad ROI analysis replaced the
+whole approach (see "Recording workflow" further down). Normalized
 0-100% brightness (Stage 9) isn't built yet -- that needs a separate
 dark-reference/max-reference calibration (distinct from the background
 reference above, which only cancels static structure, not a brightness
-scale). Results
-tab is still a placeholder, no logging yet.
+scale) -- not built.
 
 **Camera sources + VDO.Ninja (done): a second, alternate camera source,
 completely isolated calibration per source, and a color-based detector
 that swaps in automatically for it.** See "Camera sources and
-calibration profiles" below. Fragment-to-circle grouping/size-limit
-validation is explicitly not built for either source yet -- this stage
-was about making both sources, their separate calibration profiles, and
-detector switching work reliably first.
+calibration profiles" below. This stage was about making both sources,
+their separate calibration profiles, and detector switching work
+reliably first; per-pad measurement came later and took a different
+direction (per-ROI, not circle grouping -- see "Recording workflow"
+further down).
 
 Camera: InnoMaker/UVC industrial camera, model **U20CAM-9281M**. The
 log2-seconds exposure math and `CAP_PROP_GAIN`/`CAP_PROP_AUTO_EXPOSURE`
@@ -93,10 +102,6 @@ lose the friendly device names and `--list-formats`.
 
 (If you already ran the VDO.Ninja program in the parent folder,
 `opencv-python`/`numpy` are already installed system-wide.)
-
-`AMCAP2.EXE` is also sitting in this folder (not something this code
-touches or launches) -- useful as a manual side-by-side reference if you
-want to sanity-check what this tool reports against AMCap's own dialogs.
 
 ## Files
 
@@ -132,12 +137,16 @@ want to sanity-check what this tool reports against AMCap's own dialogs.
   `distortion.py`. Independent of `distortion.py` (separate storage, per
   the project's module-separation pattern), though the Calibration tab UI
   requires a distortion calibration to already exist before using it.
-- `circle_config.py` (Stage 5) -- user-set circle expectations (count
-  mode, expected count, expected area, area tolerance), the USB
-  detector's three difference thresholds, and (additive) the VDO.Ninja
-  color detector's own settings (color preset, hue/sat/val thresholds,
-  its own three confidence thresholds, mask visibility, processing FPS)
-  -- one shared schema, same `path=` pattern.
+- `circle_config.py` (Stage 5) -- the USB detector's three difference
+  thresholds, and (additive) the VDO.Ninja color detector's own settings
+  (color preset, hue/sat/val thresholds, its own three confidence
+  thresholds, mask visibility, processing FPS) -- one shared schema, same
+  `path=` pattern. (Also used, unmodified, by the Processing tab's
+  offline detection -- see "Recording workflow" below. Originally also
+  held expected-circle-count/area/tolerance fields; removed along with
+  `assignment.py`/`measurement.py` below, once the Processing tab's
+  per-pad ROI analysis replaced circle-grouping entirely. The filename
+  predates that removal.)
 - `background_reference.py` -- `save_background_reference()`/
   `load_background_reference()` (a corrected frame, captured with no
   intended contact light) and `compute_difference()` (nonnegative
@@ -150,16 +159,16 @@ want to sanity-check what this tool reports against AMCap's own dialogs.
   a fragment is circular. Shared verbatim by both detectors -- see
   "Camera sources and calibration profiles" below for how
   `color_detection.py` reuses it unchanged.
-- `assignment.py` (Stage 7) -- `assign_fragments_to_circles()`: groups
+- `assignment.py` / `measurement.py` (Stages 7-8) -- **removed.** Grouped
   detected fragments into physical circles by location/distance/overlap
-  with a computed expected-circle ROI, without ever touching a fragment's
-  mask. Tested and correct, but not currently called by the live
-  Detection tab -- see "Detection tab" below for why.
-- `measurement.py` (Stage 8, partial) -- `measure_circles()`: per-circle
-  possible/probable/strong illuminated area and coverage percentage.
-  Also not currently called by the live Detection tab. Normalized
-  0-100% brightness intensity is NOT here yet -- that needs
-  Stage 9's dark-reference/max-reference calibration.
+  with a computed expected-circle ROI (`assign_fragments_to_circles()`),
+  then measured per-circle possible/probable/strong area and coverage
+  (`measure_circles()`). Tested and correct at the time, but never called
+  by the live Detection tab, and the Processing tab's later per-pad ROI
+  analysis (user-drawn rectangular search regions, independent detection
+  per region -- see "Recording workflow" below) replaced the whole
+  approach rather than ever wiring these in. Confirmed zero references
+  anywhere before removal.
 - `calibration_profiles.py` -- the profile registry: per-camera-source
   (`"usb"` / `"vdo_ninja"`) named profiles, each with its own subfolder
   (`profiles/<id>/`) holding that profile's own `calibration_data.json`/
@@ -187,27 +196,26 @@ want to sanity-check what this tool reports against AMCap's own dialogs.
   DirectShow's `DevicePath` property (survives reboots/replugging, unlike
   OpenCV's index), with a friendly-name fallback for the rare driver that
   doesn't expose one. See "Two USB cameras" below.
-- `fisheye_calibration.py` -- a fisheye (Kannala-Brandt) ChArUco
-  calibrator, API-parallel to `distortion.py`'s pinhole
-  `CharucoCalibrator`. Built and tested against synthetic fisheye data,
-  but **not currently wired into any tab** -- both camera roles use the
-  pinhole model today (see "Two USB cameras" below). Kept in the repo in
-  case a future need for edge-accurate wide-angle correction comes up.
+- `fisheye_calibration.py` -- **removed.** Was a fisheye (Kannala-Brandt)
+  ChArUco calibrator, API-parallel to `distortion.py`'s pinhole
+  `CharucoCalibrator`, built and tested against synthetic fisheye data
+  but never wired into any tab (both camera roles use the pinhole model
+  -- see "Two USB cameras" below). Confirmed zero references anywhere
+  before removal; revive from git history if edge-accurate wide-angle
+  correction is ever actually needed.
 - `gui_app.py` -- desktop app entry point (`MainWindow`, tab wiring, the
   dockable controls panel, `latest_frame` sharing, `active_source_type` /
-  `active_profile_key`).
+  `active_profile_key`, `frame_dispatcher` -- see "Recording workflow"
+  below).
 - `tabs/` -- one file per tab (`live_camera_tab.py`, `settings_tab.py`,
-  `calibration_tab.py`, `detection_tab.py`, `results_tab.py`), plus
-  `camera_controls_panel.py` (the reusable sliders widget embedded in
-  the Settings tab and instantiated again for the dockable panel). Each
-  is UI only -- they call into `camera.py`/`settings.py`/
-  `camera_controls.py`/`distortion.py`/`config_store.py`/
-  `calibration_profiles.py`/`vdo_ninja_source.py` rather than
-  reimplementing any of that logic.
-- `stage2_working_backup/` -- a snapshot of `camera.py`/`settings.py`/
-  `preview.py`/`processing.py`/`README.md` taken right before the desktop
-  app was added, in case anything here needs to be compared back against
-  the known-working pre-GUI state.
+  `calibration_tab.py`, `detection_tab.py`, `recordings_tab.py`,
+  `processing_tab.py`, `results_tab.py`), plus `camera_controls_panel.py`
+  (the reusable sliders widget embedded in the Settings tab and
+  instantiated again for the dockable panel). Each is UI only -- they
+  call into `camera.py`/`settings.py`/`camera_controls.py`/
+  `distortion.py`/`config_store.py`/`calibration_profiles.py`/
+  `vdo_ninja_source.py`/`recording_store.py`/`processing_project.py`/
+  `detection_pipeline.py` rather than reimplementing any of that logic.
 
 ## Find your camera index
 
@@ -426,8 +434,10 @@ prints the resulting exposure/gain so you can confirm what actually stuck.
 py gui_app.py
 ```
 
-A tabbed window: Live Camera, Settings, Calibration, Detection, Results.
-This wraps `camera.py`/`settings.py` -- neither was modified to build it.
+A tabbed window: Live Camera, Settings, Calibration, Detection,
+Recordings, Processing, Results. This wraps `camera.py`/`settings.py` --
+neither was modified to build it. The last three tabs are covered in
+their own "Recording workflow" section further down, not here.
 
 **How it's wired together** (why tab-switching can't restart or duplicate
 the camera): `MainWindow` creates all five tab widgets once, up front, and
@@ -455,8 +465,9 @@ instance, not a new one.
   `settings.py`'s existing functions unchanged, plus Load/Save and
   "Open Native Dialog...". See "Camera controls panel" below for how the
   sliders are implemented and their real hardware ranges.
-- **Calibration / Detection / Results tabs**: placeholders, as requested --
-  no lens distortion, blob detection, or measurement logic yet.
+- **Calibration / Detection tabs**: placeholders at this point in the
+  build -- lens distortion, blob detection, and measurement logic are
+  all later stages, covered in their own sections below.
 
 Closing the window releases the camera via `LiveCameraTab.stop()`,
 whether or not you clicked Disconnect first.
@@ -870,9 +881,10 @@ poorly constrained without views that reach deep into the lens's extreme
 periphery). Since the ELP's actual working area for this app isn't
 distorted enough to need full 170-degree correction, both cameras now
 share the exact same `distortion.py` pinhole/ChArUco path. A separate,
-tested fisheye calibrator (`fisheye_calibration.py`) still exists in the
-repo for if/when edge-accurate correction is ever needed, but no tab
-currently instantiates it.
+tested fisheye calibrator (`fisheye_calibration.py`) existed for
+if/when edge-accurate correction was ever needed, but no tab ever
+instantiated it, and it was later removed (see "Files" above) -- revive
+from git history if that need ever actually comes up.
 
 **Reconnecting an already-known camera never re-prompts** -- its
 existing profile is resolved by `device_path` (self-healing: a profile
@@ -1182,9 +1194,10 @@ light is not necessarily circular. This version fixes both problems:
 continuous live updates, and detected regions shown only as their actual
 traced shape, never a circle. `assignment.py`/`measurement.py` (the
 fragment-to-circle grouping + area-coverage code from the previous
-version) are untouched and still correct, just not called from this live
-loop until shape-aware, background-subtracted detection has been used
-enough to trust re-enabling grouping on top of it.
+version) were kept, untouched and still correct, for a time in case
+grouping got re-enabled on top of shape-aware detection -- ultimately
+removed once per-pad measurement was built a different way instead (see
+"Recording workflow" further down).
 
 **Continuous, without a second camera connection**: `DetectionTab` owns
 a `QTimer` (400ms -- slower than other tabs' timers since each tick now
@@ -1229,12 +1242,10 @@ anywhere. Every fragment is kept, including single-pixel ones. Each
 fragment's contour is drawn exactly as `cv2.findContours` traced it --
 no circle, no shape assumption anywhere in this module or the tab.
 
-**Grouping is off for now, on purpose**: expected circle count/area/
-tolerance are still configurable and saved (`circle_config.py`,
-unchanged), but the live loop never calls `assignment.py` -- so nothing
-is ever drawn or reported as a "circle," only as a fragment. Every
-fragment's status in the report is `UNCERTAIN`; there's no
-accepted/extra/missing bucketing yet. The report does include per-
+**Grouping was off here, on purpose, for the entire lifetime of this
+tab**: nothing is ever drawn or reported as a "circle," only as a
+fragment. Every fragment's status in the report is `UNCERTAIN`; there's
+no accepted/extra/missing bucketing. The report does include per-
 fragment ID, pixel area (mm² too, if a physical scale is saved --
 `possible_area_px` gained no new fields here, but `Fragment` gained
 `p95_brightness` alongside the existing mean/median/max/min), centroid,
@@ -1277,6 +1288,243 @@ back to a background-only frame on the next tick correctly drops back to
 report shows only `UNCERTAIN`, never `ACCEPTED`/`EXTRA`; all six panels
 render; and `main_window.latest_frame` is verified byte-identical before
 and after processing.
+
+## Recording workflow (done): record now, analyze later, per pad
+
+Everything above assumed live detection was the end state -- watch the
+feed, tune thresholds, read the report. In practice that's the wrong
+shape for actually collecting FTIR data: you want to record footage
+once, while the pad is actually in front of the camera, then go back and
+iterate on detection tuning against those exact same saved frames as
+many times as needed, without ever needing the physical setup again --
+and measure each pad's contact independently rather than getting one
+whole-frame report. This section is that: lossless recording, a
+recordings library, offline playback + detection, and per-pad ROI
+(region of interest) analysis with its own saved, re-browsable results.
+Three new tabs (Recordings, Processing, Results); the existing Live
+Camera/Detection tabs and everything above are unchanged by any of it.
+
+### Frame dispatcher + threaded capture
+
+Recording needs *every* frame the camera delivers, not just whatever a
+15ms GUI polling timer happened to grab -- so capture had to move off
+the GUI thread first. `threaded_camera_source.py`'s `ThreadedCameraSource`
+wraps an already-open `camera.CameraStream` in a dedicated background
+thread that calls `.read()` in a tight loop at the camera's true
+delivered rate, duck-typing the same `read()`/`get_info()`/`release()`
+shape `LiveCameraTab` already expected (same precedent as
+`vdo_ninja_source.VdoNinjaSource` before it) -- zero changes needed to
+`_update_frame()` itself. Two separate locks guard it deliberately (not
+one): a public `lock` around the real `cv2.VideoCapture` calls (both the
+capture loop's reads and `camera_controls_panel.py`'s slider get/set
+calls), and a private `_state_lock` around just the last-frame handoff,
+so a slider drag never makes the live preview stall waiting on the same
+lock as the capture loop's hot path.
+
+`frame_dispatcher.py`'s `FrameDispatcher` (one instance, owned by
+`main_window`, created once at startup) is the single point every
+captured frame -- USB or VDO.Ninja -- passes through before anything
+else sees it. Its `publish()` is called from whichever background
+capture thread just produced a frame, never the GUI thread, and does
+three things: rejects the frame if it's from a session that's since been
+invalidated (defense in depth -- the primary safety mechanism is the
+caller already joining the old capture thread before starting a new
+one), updates `main_window.latest_frame` for the existing GUI-polling
+consumers (Live Camera's own preview, CalibrationTab, DetectionTab --
+none of which need a gapless sequence, just "something recent"), and
+invokes every subscribed callback synchronously on the capture thread
+with the same frame. Subscriber callbacks (the recorder is the first and
+only one so far) must stay fast/non-blocking -- typically just a
+`queue.put_nowait` into the subscriber's own bounded queue, with the
+subscriber counting its own drops, not the dispatcher. A callback that
+raises is caught and printed, never allowed to take down the capture
+thread.
+
+### Recorder + on-disk recording storage
+
+`recorder.py`'s `Recorder` subscribes to the dispatcher for the exact
+duration of `start()`..`stop()` and drives a real `cv2.VideoWriter` --
+frames published while a camera is merely connected but not recording
+are never seen by this module at all, so its own frame-acquisition
+counts are honest by construction, not an after-the-fact filtered count.
+
+**Codec is chosen automatically from the active profile's `camera_role`,
+never asked for directly** -- this is the direct, evidence-based result
+of real-hardware validation against real footage from both cameras, not
+a synthetic benchmark:
+
+| `camera_role` | Codec | Why |
+|---|---|---|
+| `monochrome_ftir` (U20CAM) | **FFV1** | HFYU corrupts grayscale content by ±1 per pixel (confirmed via round-trip test); FFV1 doesn't. |
+| `color_ftir` (ELP) | **HFYU** | FFV1's color encoder can't keep up -- 67-71% frame-drop rate measured at both 1080p30 and 720p60; HFYU keeps up with zero drops and round-trips real ELP footage byte-identical. |
+
+Both are genuinely lossless -- this isn't a quality tradeoff, each
+camera role simply breaks a *different* one of the two obvious lossless
+codec choices in practice, discovered by actually recording real footage
+and diffing it back, not by reading a compatibility table. A separate
+`quality_mode="lossy_prototype"` override exists for either role
+(MJPG), explicitly tagged in `metadata.json` and never treated as
+measurement-grade by anything downstream -- for quick framing/setup
+checks where disk space matters more than fidelity.
+
+`recording_store.py` owns the on-disk schema:
+
+```
+recordings/<recording_id>/
+    recording.<ext>            -- written by recorder.py
+    metadata.json               -- camera/calibration/recording blocks
+    frame_index.jsonl           -- one row per frame (timestamp, write outcome)
+    calibration_snapshot/
+        calibration_data.json
+        scale_calibration.json
+        circle_config.json
+        background_reference.npy   -- only if present at record time
+    .incomplete                 -- present only while open; removed only on a verified-clean finalize
+```
+
+**Self-containment, structurally enforced, not just documented**:
+`calibration_snapshot/` is populated once, at record start, by copying
+the profile's *actual* files as they exist right now
+(`snapshot_calibration()`) -- never re-resolved from the live profile
+again afterward. Every offline read (Processing tab's playback,
+detection, ROI analysis) loads from a recording's own snapshot only,
+never the live profile -- so editing or even deleting the source profile
+later can never change what an old recording measures against. The same
+`.incomplete`-marker crash-safety pattern Stage-3-era calibration
+sanity-checking established is reused here: removed only after
+`finalize_recording()` succeeds, so a process killed mid-recording
+leaves unambiguous evidence, and reused again below for analysis runs.
+`DiskSpaceEstimator`/`has_minimum_recording_headroom()` refuse to
+start (or keep extending) a recording once free space drops below a
+safety margin, rather than finding out from a failed write partway
+through a long session.
+
+### Recordings tab
+
+Browse everything on disk under `recordings/`: rename, notes, protect
+(blocks delete until explicitly unprotected), delete, open the folder in
+the OS file browser, and **Import Video** for footage that didn't come
+from this app's own recorder (reads the file's real resolution/fps/frame
+count directly rather than trusting a filename, warns if the selected
+camera profile's saved calibration resolution doesn't match, and always
+tags imported footage `quality_mode="lossy_prototype"` -- this app has
+no way to verify an externally-sourced file's lossless fidelity, so it's
+never silently treated as measurement-grade). **Open in Processing**
+switches to the Processing tab with that recording loaded.
+
+### Processing tab: offline playback, full-frame detection, per-pad ROI analysis
+
+Playback of a saved recording with zoom (up to 400%, drag/scrollbars to
+pan), speed control, and double-click either video panel to expand it
+full-size (hides the sibling panel *and* the detection/ROI controls
+below it, so the expanded panel actually gets the freed space rather
+than just the sibling's half of the row).
+
+**Full-frame detection reuses the exact same code DetectionTab's live
+loop calls** -- `detection_pipeline.run_detection()` was extracted
+specifically so both call sites share one implementation, resolving
+`detector_type`/config/background from a recording's own calibration
+snapshot instead of the live profile (see self-containment above), with
+zero duplicated detector logic.
+
+**Per-pad ROI (region of interest) analysis** is built on top of that,
+not a second detector: draw a rectangle around each expected pad (drawn
+deliberately *larger* than the pad's real contact area -- it's a search
+boundary, never counted as contact itself), and detection then runs
+**independently within each ROI's own crop** -- crop the corrected frame
+to the rectangle first, then call the identical `run_detection()` on
+just that crop, rather than detecting once on the whole frame and
+intersecting the result with each ROI afterward. This distinction is
+the whole point, not a style preference: the color detector's hysteresis
+keeps a whole connected component alive if *any* pixel in it reaches the
+"strong" confidence tier -- so a crop-after-the-fact approach could let
+a weak-only blob inside one pad's ROI survive only because a strong
+pixel *outside that ROI, elsewhere in the frame* happened to share its
+connected component. Cropping first makes that structurally impossible:
+the crop simply never contains those outside pixels for
+connected-components to see. Verified directly with a constructed
+reproduction proving the leak is closed.
+
+Coverage percentage is always computed as `detected_contact_area_mm2 /
+expected_area_mm2`, where `expected_area_mm2` is a number you enter per
+ROI (the pad's real physical contact area) -- **never** against the
+ROI rectangle's own area, which is deliberately oversized as a search
+margin; using it as the denominator would silently understate coverage
+by however much margin was drawn. Coverage is `None` (shown as N/A),
+never a fabricated `0`, whenever either the physical scale or the
+expected area isn't configured.
+
+Other ROI-analysis details worth knowing:
+- **Overlapping ROIs are allowed but block Range/Full analysis** (a
+  pixel could otherwise get double-counted toward two pads) -- shown as
+  a prominent warning; current-frame preview still runs to help you fix
+  it, but its numbers are explicitly marked invalid while the warning is
+  showing.
+- **Multiple colors can be targeted at once** (e.g. cyan + blue
+  together) -- checking several hue presets simply concatenates their
+  hue ranges before matching, reusing `color_detection.py`'s existing
+  multi-range matcher rather than adding new logic.
+- **Per-ROI minimum-area noise filter**: a detected blob smaller than a
+  configurable threshold (mm² if the recording has a physical scale,
+  else raw px) is dropped entirely -- excluded from every downstream
+  number (area, coverage), not just hidden from display.
+- **The combined-fragments overlay draws the true shape, not a convex
+  hull.** An early version of the "combine every pad's fragments into
+  one outline + one total" display mode used `cv2.convexHull()`, which
+  straight-lines across any concave dip in the real shape -- a crescent-
+  shaped specular highlight (a very real, very common detected shape on
+  a curved reflective pad) would get an outline covering roughly double
+  its actual detected area. Fixed by reconstructing the true pixel union
+  of every fragment's own exact mask and tracing *that* contour instead;
+  confirmed directly against a synthetic crescent that the fix's
+  enclosed area (~4400px) matches the true shape (~4360px) where the old
+  hull version enclosed ~8460px.
+- **Mouse-to-image coordinate mapping accounts for panel letterboxing.**
+  The video panels have a hard minimum size; when the computed display
+  scale would otherwise produce a smaller pixmap, Qt silently clamps the
+  label larger and centers the pixmap inside it (`AlignCenter`) -- a real
+  bug (reported as "the box doesn't go where I draw it") where ROI
+  rectangles landed offset from the actual drag. Fixed by tracking that
+  centering offset explicitly at render time and subtracting it before
+  scaling drag coordinates back to image pixels, rather than assuming
+  the pixmap always fills the label exactly.
+
+**Analysis runs** (`processing_project.py`) persist Range/Full detection
+results separately from the immutable recording, under
+`processing_projects/<project_id>/`:
+
+```
+processing_projects/<project_id>/
+    project.json                        -- ROI definitions, references recording_id
+    analysis_runs/<analysis_run_id>/
+        run.json                        -- full config/ROI snapshot AS USED, status, stop_reason
+        roi_results.jsonl               -- one row per (frame, ROI), references analysis_run_id
+        .incomplete                     -- same crash-safety marker as recording_store.py's
+```
+
+Every Range/Full execution gets its own `analysis_run_id` and its own
+`roi_results.jsonl` -- results from different configs, or reruns, are
+never appended into one shared file, which would make "which config
+produced this row" ambiguous without cross-referencing every row. The
+full config/ROI snapshot is stored once in `run.json`; a cancelled,
+crashed, or failed run gets an honest `run.json` (real status, real
+stop_reason, however far it actually got) and keeps its `.incomplete`
+marker regardless -- only a run that reaches a clean, fully-successful
+finish ever loses it, confirmed directly by injecting a real exception
+mid-run and checking the marker survives.
+
+### Results tab
+
+Originally planned (see the placeholder note that used to be here, and
+the old Stage 9/10 description above) as a live per-circle measurement
+view with its own logging. Superseded by the ROI analysis-run system
+above, which already produces and persists exactly that kind of
+per-frame/per-ROI measurement -- for recorded video, not live. This tab
+is now a browser over what that system has actually saved: every
+analysis run across every recording's processing project in one table,
+with Open Folder, Export CSV (flattens `roi_results.jsonl`'s nested
+per-row fields into spreadsheet-friendly columns), Delete, and a jump
+back to that recording in Processing.
 
 ## Controls (`preview.py` CLI)
 

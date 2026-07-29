@@ -6,7 +6,7 @@
   "possible_threshold": 10,
   "probable_threshold": 25,
   "strong_threshold": 50,
-  "color_preset": "blue",
+  "color_preset": "cyan",
   "hue_min": null,
   "hue_max": null,
   "weak_sat_min": 30,

@@ -24,9 +24,9 @@
       "profile_version": 1,
       "camera_role": "monochrome_ftir",
       "alias": "Monochrome FTIR Camera",
-      "connect_width": null,
-      "connect_height": null,
-      "connect_fps": null
+      "connect_width": 1280,
+      "connect_height": 800,
+      "connect_fps": 120.0
     },
     {
       "id": "vdo_ninja_cc5b68fca6",
@@ -74,10 +74,10 @@
       "resolution": null,
       "orientation": "normal",
       "crop_percentages": {
-        "top": 0,
-        "bottom": 9,
-        "left": 20,
-        "right": 24
+        "top": 19,
+        "bottom": 28,
+        "left": 33,
+        "right": 35
       },
       "created_at": "2026-07-27T02:18:47"
     }

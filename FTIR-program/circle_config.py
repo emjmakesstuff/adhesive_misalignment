@@ -1,18 +1,16 @@
 """
-Stage 5: expected circle configuration, plus the three detection
-brightness thresholds (kept here rather than a separate thresholds.py --
-both are just user-set detection configuration, not algorithm logic, so
-bundling them keeps detection.py/assignment.py/measurement.py focused on
-their actual algorithms).
+Detection threshold configuration: the USB/grayscale detector's three
+difference thresholds, plus the VDO.Ninja/color detector's own settings
+(kept here rather than a separate thresholds.py -- both are just
+user-set detection configuration, not algorithm logic, so bundling them
+keeps detection.py focused on its actual algorithm).
 
-count_mode:
-    "exact" -- expect exactly expected_count circles; a shortfall is
-        reported as missing rather than an error.
-    "max"   -- expect at most expected_count circles; fewer is normal.
-
-area_tolerance_pct is a percentage of expected_area_mm2 (e.g. 25.0 means
-a candidate group's total area must land within +/-25% of
-expected_area_mm2 to be treated as a valid match, not "extra").
+(Originally also held expected-circle-count/area/tolerance fields for
+grouping detected fragments into circles -- removed along with
+assignment.py/measurement.py, which were the only code that ever read
+them; the Processing tab's per-pad ROI analysis replaced that whole
+approach with user-drawn rectangular search regions instead. The
+filename predates that removal.)
 
 possible/probable/strong_threshold are 0-255 cut points applied to the
 background-subtracted DIFFERENCE image (see background_reference.py),
@@ -44,19 +42,15 @@ from typing import Any
 DEFAULT_CIRCLE_CONFIG_PATH = Path(__file__).parent / "circle_config.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "count_mode": "exact",
-    "expected_count": 1,
-    "expected_area_mm2": 78.5,
-    "area_tolerance_pct": 25.0,
     "possible_threshold": 10,
     "probable_threshold": 25,
     "strong_threshold": 50,
     # VDO.Ninja / color_detection.py's own settings:
-    "color_preset": "purple",
+    "color_preset": "blue",
     "hue_min": None,
     "hue_max": None,
-    "weak_sat_min": 30,
-    "weak_val_min": 50,
+    "weak_sat_min": 90,
+    "weak_val_min": 90,
     "core_sat_min": 100,
     "core_val_min": 100,
     "vdo_possible_threshold": 10,

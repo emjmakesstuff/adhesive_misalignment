@@ -20,13 +20,18 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow, QTabWidget
 
 import calibration_profiles
+from frame_dispatcher import FrameDispatcher
+from recorder import Recorder
 from tabs.calibration_tab import CalibrationTab
 from tabs.camera_controls_panel import CameraControlsPanel
 from tabs.detection_tab import DetectionTab
 from tabs.live_camera_tab import LiveCameraTab
+from tabs.processing_tab import ProcessingTab
+from tabs.recordings_tab import RecordingsTab
 from tabs.results_tab import ResultsTab
 from tabs.settings_tab import SettingsTab
 
@@ -89,6 +94,19 @@ class MainWindow(QMainWindow):
         self.default_controls: dict | None = None
         self.default_exposure_info: dict | None = None
 
+        # Single dispatcher instance for the app's lifetime -- every
+        # background capture thread (ThreadedCameraSource for USB,
+        # VdoNinjaSource for VDO.Ninja) publishes into this one object
+        # regardless of how many times a source connects/disconnects
+        # across the session. See frame_dispatcher.py.
+        self.frame_dispatcher = FrameDispatcher(self)
+
+        # Single Recorder instance for the app's lifetime, same pattern as
+        # frame_dispatcher above -- LiveCameraTab drives start()/stop() on
+        # it (Start/Stop Recording buttons, the hotkey below, and the
+        # finalize-on-disconnect/close/error paths it owns).
+        self.recorder = Recorder(self)
+
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -96,13 +114,39 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab(self)
         self.calibration_tab = CalibrationTab(self)
         self.detection_tab = DetectionTab(self)
+        self.recordings_tab = RecordingsTab(self)
+        self.processing_tab = ProcessingTab(self)
         self.results_tab = ResultsTab(self)
 
         self.tabs.addTab(self.live_camera_tab, "Live Camera")
         self.tabs.addTab(self.settings_tab, "Settings")
         self.tabs.addTab(self.calibration_tab, "Calibration")
         self.tabs.addTab(self.detection_tab, "Detection")
+        self.tabs.addTab(self.recordings_tab, "Recordings")
+        self.tabs.addTab(self.processing_tab, "Processing")
         self.tabs.addTab(self.results_tab, "Results")
+
+        # Recordings created/finalized elsewhere (Live Camera's Start/Stop
+        # Recording, the hotkey) don't otherwise notify this tab -- refresh
+        # whenever it becomes the visible tab so its list is never stale
+        # without requiring a manual Refresh click.
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.recordings_tab:
+            self.recordings_tab.refresh()
+        elif self.tabs.widget(index) is self.results_tab:
+            self.results_tab.refresh()
+
+    def open_recording_in_processing(self, recording_id: str) -> None:
+        """Called by RecordingsTab's "Open in Processing" button."""
+        self.processing_tab.open_recording(recording_id)
+        self.tabs.setCurrentWidget(self.processing_tab)
+
+        # App-wide -- works regardless of which tab currently has focus,
+        # not just while Live Camera is the visible tab.
+        self.record_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.record_shortcut.activated.connect(self.live_camera_tab.toggle_recording_hotkey)
 
     def on_camera_connected(self) -> None:
         """Called by LiveCameraTab right after a successful connect, so
@@ -146,6 +190,8 @@ class MainWindow(QMainWindow):
         self.live_camera_tab.set_controls_button_checked(visible)
 
     def closeEvent(self, event) -> None:
+        if self.recorder.is_recording:
+            self.recorder.stop(stop_reason="app_close")
         self.live_camera_tab.stop()
         event.accept()
 
@@ -153,7 +199,7 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(1200, 720)
+    window.resize(1440, 900)
     window.show()
     sys.exit(app.exec())
 

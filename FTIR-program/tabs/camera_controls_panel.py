@@ -152,7 +152,13 @@ class CameraControlsPanel(QWidget):
         if stream is None or stream.cap is None:
             return
 
-        result = camera_controls.set_value(stream.cap, name, float(value))
+        # ThreadedCameraSource's capture thread is now genuinely
+        # concurrent with this GUI-thread cap access -- the same lock it
+        # holds around its own read() calls (see threaded_camera_source.py)
+        # must be held here too, since cv2.VideoCapture doesn't guarantee
+        # thread-safe get()/set() alongside read().
+        with stream.lock:
+            result = camera_controls.set_value(stream.cap, name, float(value))
         self.value_labels[name].setText(f"{result:.0f}")
 
     def apply_auto_wb(self, checked: bool) -> None:
@@ -161,7 +167,8 @@ class CameraControlsPanel(QWidget):
         if stream is None or stream.cap is None:
             return
 
-        result = camera_controls.set_auto_wb(stream.cap, checked)
+        with stream.lock:
+            result = camera_controls.set_auto_wb(stream.cap, checked)
         self.sliders["wb_temperature"].setEnabled(not result)
 
     def apply_exposure(self) -> None:
@@ -174,7 +181,8 @@ class CameraControlsPanel(QWidget):
         # balance where "manual" can just mean "stop adjusting, keep the
         # current value" -- so Apply always (re)asserts manual mode too,
         # which _show_exposure_info reflects in the checkbox below.
-        info = set_manual_exposure(stream.cap, self.exposure_spin.value())
+        with stream.lock:
+            info = set_manual_exposure(stream.cap, self.exposure_spin.value())
         self._show_exposure_info(info)
 
     def apply_auto_exposure_toggle(self, checked: bool) -> None:
@@ -189,10 +197,11 @@ class CameraControlsPanel(QWidget):
             self.status_label.setText("Not connected -- open Live Camera tab and connect first.")
             return
 
-        if checked:
-            info = set_auto_exposure(stream.cap)
-        else:
-            info = set_manual_exposure(stream.cap, self.exposure_spin.value())
+        with stream.lock:
+            if checked:
+                info = set_auto_exposure(stream.cap)
+            else:
+                info = set_manual_exposure(stream.cap, self.exposure_spin.value())
 
         self._show_exposure_info(info)
 
@@ -236,7 +245,8 @@ class CameraControlsPanel(QWidget):
             self.status_label.setText("Not connected -- open Live Camera tab and connect first.")
             return
 
-        values = camera_controls.get_all(stream.cap)
+        with stream.lock:
+            values = camera_controls.get_all(stream.cap)
 
         for name, slider in self.sliders.items():
             slider.blockSignals(True)
@@ -249,7 +259,9 @@ class CameraControlsPanel(QWidget):
         self.auto_wb_check.blockSignals(False)
         self.sliders["wb_temperature"].setEnabled(not values["auto_wb"])
 
-        self._show_exposure_info(get_exposure_gain_info(stream.cap))
+        with stream.lock:
+            exposure_info = get_exposure_gain_info(stream.cap)
+        self._show_exposure_info(exposure_info)
 
     def reset_to_defaults(self) -> None:
         """
@@ -275,20 +287,21 @@ class CameraControlsPanel(QWidget):
             )
             return
 
-        for name, value in defaults.items():
-            if name == "auto_wb":
-                camera_controls.set_auto_wb(stream.cap, value)
-            else:
-                camera_controls.set_value(stream.cap, name, value)
+        with stream.lock:
+            for name, value in defaults.items():
+                if name == "auto_wb":
+                    camera_controls.set_auto_wb(stream.cap, value)
+                else:
+                    camera_controls.set_value(stream.cap, name, value)
 
-        if exposure_defaults is not None:
-            if exposure_defaults["mode"] == "manual":
-                set_manual_exposure(stream.cap, exposure_defaults["exposure_ms"])
-            elif exposure_defaults["mode"] == "auto":
-                set_auto_exposure(stream.cap)
-            # "unknown" mode: driver doesn't clearly support the DirectShow
-            # manual/auto convention here (seen on this dev environment's
-            # test camera) -- nothing meaningful to restore.
+            if exposure_defaults is not None:
+                if exposure_defaults["mode"] == "manual":
+                    set_manual_exposure(stream.cap, exposure_defaults["exposure_ms"])
+                elif exposure_defaults["mode"] == "auto":
+                    set_auto_exposure(stream.cap)
+                # "unknown" mode: driver doesn't clearly support the DirectShow
+                # manual/auto convention here (seen on this dev environment's
+                # test camera) -- nothing meaningful to restore.
 
         self.refresh_from_camera()
         self.status_label.setText("Reset to as-connected defaults.")
